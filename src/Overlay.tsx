@@ -36,6 +36,12 @@ export function Overlay() {
 
   const [connected, setConnected] = useState(false)
   const [status, setStatus] = useState<'sleep' | 'idle' | 'vibing' | 'chatting' | 'active'>('sleep')
+  const [debugMode, setDebugMode] = useState(() => localStorage.getItem('crawd:debug') === '1')
+  const [talkText, setTalkText] = useState(() => localStorage.getItem('crawd:talkText') ?? '')
+  const [chatText, setChatText] = useState(() => localStorage.getItem('crawd:chatText') ?? '')
+  const [debugResponse, setDebugResponse] = useState(() => localStorage.getItem('crawd:debugResponse') ?? 'This is a test response from the bot!')
+  const [debugLoading, setDebugLoading] = useState(false)
+  const [showAll, setShowAll] = useState(() => localStorage.getItem('crawd:showAll') === '1')
 
   const { amplitude, connectAudio } = useAudioAnalysis()
 
@@ -155,6 +161,52 @@ export function Overlay() {
     }
   }, [processNextTalk, connectAudio])
 
+  // Persist debug field values to localStorage
+  useEffect(() => { localStorage.setItem('crawd:talkText', talkText) }, [talkText])
+  useEffect(() => { localStorage.setItem('crawd:chatText', chatText) }, [chatText])
+  useEffect(() => { localStorage.setItem('crawd:debugResponse', debugResponse) }, [debugResponse])
+  useEffect(() => { localStorage.setItem('crawd:showAll', showAll ? '1' : '0') }, [showAll])
+
+  // Debug mode toggle (Ctrl+D) — persisted in localStorage
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key === 'd') {
+        e.preventDefault()
+        setDebugMode(prev => {
+          const next = !prev
+          localStorage.setItem('crawd:debug', next ? '1' : '0')
+          return next
+        })
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [])
+
+  const sendTalk = () => {
+    if (!talkText.trim()) return
+    enqueueTalk({ text: talkText, replyTo: null })
+    setTalkText('')
+  }
+
+  const sendTurn = async () => {
+    if (!chatText.trim() || debugLoading) return
+    setDebugLoading(true)
+    try {
+      const res = await fetch(`${SOCKET_URL}/mock/turn`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'debug_user', message: chatText, response: debugResponse }),
+      })
+      if (!res.ok) console.error('Failed to send mock turn:', await res.text())
+    } catch (e) {
+      console.error('Failed to send mock turn:', e)
+    } finally {
+      setDebugLoading(false)
+      setChatText('')
+    }
+  }
+
   // Socket.io connection
   useEffect(() => {
     const socket = io(SOCKET_URL, { transports: ["websocket"] })
@@ -185,26 +237,6 @@ export function Overlay() {
 
   return (
     <div className="w-screen h-screen relative">
-      {/* Connection indicator */}
-      {import.meta.env.DEV && (
-        <div className="absolute top-4 left-4 z-50">
-          <div className={`w-3 h-3 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
-        </div>
-      )}
-
-      {/* Status label */}
-      <div className="absolute bottom-6 left-6">
-        <span
-          className="text-white text-xl"
-          style={{
-            fontFamily: '"SF Pro Rounded", sans-serif', fontWeight: 900,
-            WebkitTextStroke: "5px black", paintOrder: "stroke fill",
-          }}
-        >
-          status: {status}
-        </span>
-      </div>
-
       {/* Branding */}
       <div className="absolute bottom-6 right-6">
         <span
@@ -218,9 +250,9 @@ export function Overlay() {
         </span>
       </div>
 
-      {/* Chat message bubble (turn phase: chat) */}
+      {/* Chat message bubble (turn phase: chat, or pinned via showAll) */}
       <AnimatePresence>
-        {turnPhase === 'chat' && currentTurn && (
+        {(showAll || (turnPhase === 'chat' && currentTurn)) && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <motion.div
               className="relative bg-white rounded-3xl rounded-bl-none px-12 py-8 max-w-[640px] min-w-[340px] border border-black/20"
@@ -245,13 +277,13 @@ export function Overlay() {
                 className="text-black text-4xl"
                 style={{ fontFamily: '"SF Pro Rounded", sans-serif', fontWeight: 600 }}
               >
-                {currentTurn.chat.message}
+                {currentTurn?.chat.message ?? "Hey, what do you think about this?"}
               </p>
               <p
                 className="text-black/50 text-lg mt-3"
                 style={{ fontFamily: '"SF Pro Rounded", sans-serif', fontWeight: 500 }}
               >
-                — {currentTurn.chat.username}
+                — {currentTurn?.chat.username ?? "viewer123"}
               </p>
             </motion.div>
           </div>
@@ -265,13 +297,103 @@ export function Overlay() {
             <OverlayBubble message={currentTurn.botMessage} replyTo={null} />
           )}
         </AnimatePresence>
-        <OverlayBubble message={currentMessage?.text ?? null} replyTo={currentMessage?.replyTo ?? null} />
+        {showAll
+          ? <OverlayBubble message="Oh that's a great question, let me think about it!" replyTo={null} />
+          : <OverlayBubble message={currentMessage?.text ?? null} replyTo={currentMessage?.replyTo ?? null} />
+        }
       </div>
 
       {/* Avatar */}
       <div className="absolute bottom-18 right-5.5">
-        <OverlayFace status={status} audioAmplitude={amplitude} />
+        <OverlayFace status={turnPhase !== 'idle' || currentMessage ? 'chatting' : status} audioAmplitude={amplitude} />
       </div>
+
+      {/* Debug Panel (Ctrl+D to toggle) */}
+      {debugMode && (
+        <div className="absolute top-6 left-6 bg-black/90 p-4 rounded-lg text-white font-mono text-sm space-y-3 min-w-[300px]">
+          <div className="border-b border-white/20 pb-2">
+            <div className="text-lg font-bold">Debug Panel (Ctrl+D to close)</div>
+          </div>
+
+          <div>
+            <div className="text-white/60 mb-1">Set Status:</div>
+            <div className="flex gap-2">
+              {(['sleep', 'idle', 'vibing', 'chatting'] as const).map(s => (
+                <button
+                  key={s}
+                  onClick={() => setStatus(s)}
+                  className={`px-3 py-1 rounded ${status === s ? 'bg-white text-black' : 'bg-white/20 hover:bg-white/30'}`}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div className="text-white/60 mb-1">Talk:</div>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={talkText}
+                onChange={e => setTalkText(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && sendTalk()}
+                placeholder="Bot says..."
+                className="flex-1 px-2 py-1 rounded bg-white/10 border border-white/20 focus:outline-none focus:border-white/40"
+              />
+              <button onClick={sendTalk} className="px-3 py-1 rounded bg-white/20 hover:bg-white/30">
+                Send
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-white/60 mb-1">Chat says, bot replies:</div>
+            <div className="space-y-2">
+              <input
+                type="text"
+                value={chatText}
+                onChange={e => setChatText(e.target.value)}
+                placeholder="Chat message..."
+                className="w-full px-2 py-1 rounded bg-white/10 border border-white/20 focus:outline-none focus:border-white/40"
+              />
+              <input
+                type="text"
+                value={debugResponse}
+                onChange={e => setDebugResponse(e.target.value)}
+                placeholder="Bot response..."
+                className="w-full px-2 py-1 rounded bg-white/10 border border-white/20 focus:outline-none focus:border-white/40"
+              />
+              <button
+                onClick={sendTurn}
+                disabled={debugLoading || !chatText.trim()}
+                className={`w-full px-3 py-1 rounded ${debugLoading ? 'bg-blue-500/30 cursor-wait' : 'bg-blue-500/50 hover:bg-blue-500/70'} disabled:opacity-50`}
+              >
+                {debugLoading ? 'Generating TTS...' : 'Send'}
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-white/60 mb-1">Audio Amplitude:</div>
+            <div className="h-2 bg-white/10 rounded overflow-hidden">
+              <div className="h-full bg-green-500 transition-all duration-50" style={{ width: `${amplitude * 100}%` }} />
+            </div>
+            <div className="text-white/40 text-xs mt-1">{(amplitude * 100).toFixed(0)}%</div>
+          </div>
+
+          <button
+            onClick={() => setShowAll(prev => !prev)}
+            className={`w-full px-3 py-1 rounded ${showAll ? 'bg-yellow-500 text-black' : 'bg-white/20 hover:bg-white/30'}`}
+          >
+            {showAll ? 'Hide all elements' : 'Show all elements'}
+          </button>
+
+          <div className="text-white/40 text-xs">
+            status={status}, connected={connected ? 'yes' : 'no'}, turnPhase={turnPhase}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
