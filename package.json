@@ -9,12 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@crawd/cli": "^0.2.0",
+    "@crawd/cli": "0.3.0",
     "@tailwindcss/vite": "^4.1.18",
     "motion": "^12.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "socket.io-client": "^4.8.1",
     "tailwindcss": "^4.1.18"
   },
   "devDependencies": {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { io } from "socket.io-client"
+import { createCrawdClient } from "@crawd/cli/client"
 import { motion, AnimatePresence } from "motion/react"
-import type { ReplyTurnEvent, TalkEvent, TtsEvent, StatusEvent } from "@crawd/cli"
+import type { ReplyTurnEvent } from "@crawd/cli"
 import { OverlayFace } from "./components/OverlayFace"
 import { OverlayBubble } from "./components/OverlayBubble"
 import { useAudioAnalysis } from "./hooks/useAudioAnalysis"
@@ -207,27 +207,27 @@ export function Overlay() {
     }
   }
 
-  // Socket.io connection
+  // Connect to backend via SDK
   useEffect(() => {
-    const socket = io(SOCKET_URL, { transports: ["websocket"] })
+    const client = createCrawdClient(SOCKET_URL)
 
-    socket.on("connect", () => setConnected(true))
-    socket.on("disconnect", () => setConnected(false))
+    client.on('connect', () => setConnected(true))
+    client.on('disconnect', () => setConnected(false))
 
-    socket.on("crawd:reply-turn", (data: ReplyTurnEvent) => enqueueTurn(data))
+    client.on('reply-turn', (data) => enqueueTurn(data))
 
-    socket.on("crawd:talk", (data: TalkEvent) => {
+    client.on('talk', (data) => {
       enqueueTalk({ text: data.message, replyTo: data.replyTo ?? null })
     })
 
-    socket.on("crawd:tts", (data: TtsEvent) => attachTts(data.ttsUrl))
+    client.on('tts', (data) => attachTts(data.ttsUrl))
 
-    socket.on("crawd:status", (data: StatusEvent) => {
+    client.on('status', (data) => {
       setStatus(data.status as typeof status)
     })
 
     return () => {
-      socket.disconnect()
+      client.destroy()
       if (turnTimerRef.current) clearTimeout(turnTimerRef.current)
       if (talkTimerRef.current) clearTimeout(talkTimerRef.current)
       if (turnAudioRef.current) turnAudioRef.current.pause()
