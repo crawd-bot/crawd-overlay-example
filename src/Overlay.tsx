@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { createCrawdClient } from "@crawd/cli/client"
+import { createCrawdClient, type CrawdClient } from "@crawd/cli/client"
 import { motion, AnimatePresence } from "motion/react"
 import type { ReplyTurnEvent } from "@crawd/cli"
 import { OverlayFace } from "./components/OverlayFace"
@@ -7,15 +7,14 @@ import { OverlayBubble } from "./components/OverlayBubble"
 import { useAudioAnalysis } from "./hooks/useAudioAnalysis"
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000"
-const BUBBLE_TIMEOUT = 15000
 const BUBBLE_GAP = 1500
 
 type TurnPhase = 'idle' | 'chat' | 'response'
 
 type TalkItem = {
+  id: string
   text: string
-  replyTo: string | null
-  ttsUrl?: string
+  ttsUrl: string
 }
 
 export function Overlay() {
@@ -27,12 +26,15 @@ export function Overlay() {
   const turnAudioRef = useRef<HTMLAudioElement | null>(null)
   const turnProcessingRef = useRef(false)
 
-  // Vibe message state (no chat context)
-  const [currentMessage, setCurrentMessage] = useState<{ text: string; replyTo: string | null } | null>(null)
+  // Talk message state (agent-controlled speech)
+  const [currentMessage, setCurrentMessage] = useState<{ text: string } | null>(null)
   const talkQueueRef = useRef<TalkItem[]>([])
   const talkProcessingRef = useRef(false)
   const talkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const talkAudioRef = useRef<HTMLAudioElement | null>(null)
+
+  // Client ref for sending acks back to backend
+  const clientRef = useRef<CrawdClient | null>(null)
 
   const [connected, setConnected] = useState(false)
   const [status, setStatus] = useState<'sleep' | 'idle' | 'vibing' | 'chatting' | 'active'>('sleep')
@@ -103,63 +105,45 @@ export function Overlay() {
     if (!turnProcessingRef.current) { turnProcessingRef.current = true; processNextTurn() }
   }, [processNextTurn])
 
-  // Process next talk message (vibe flow)
+  // Process next talk message — always has ttsUrl (atomic event)
   const processNextTalk = useCallback(() => {
     if (talkQueueRef.current.length === 0) { talkProcessingRef.current = false; return }
 
     talkProcessingRef.current = true
     const item = talkQueueRef.current.shift()!
-    setCurrentMessage({ text: item.text, replyTo: item.replyTo })
+    setCurrentMessage({ text: item.text })
 
     const finish = () => {
+      // Stop audio and clean up
+      if (talkAudioRef.current) {
+        talkAudioRef.current.pause()
+        talkAudioRef.current = null
+      }
       setCurrentMessage(null)
+
+      // Send ack to backend so the agent's tool call resolves
+      clientRef.current?.emit('talk:done', { id: item.id })
+
       talkTimerRef.current = setTimeout(processNextTalk, BUBBLE_GAP)
     }
 
-    if (item.ttsUrl) {
-      if (talkAudioRef.current) talkAudioRef.current.pause()
-      const audio = new Audio(item.ttsUrl)
-      audio.volume = 0.8
-      audio.crossOrigin = "anonymous"
-      talkAudioRef.current = audio
-      audio.onended = () => { talkTimerRef.current = setTimeout(finish, 1500) }
-      audio.onerror = () => { talkTimerRef.current = setTimeout(finish, 3000) }
-      connectAudio(audio)
-      audio.play().catch(() => { talkTimerRef.current = setTimeout(finish, 3000) })
-      talkTimerRef.current = setTimeout(finish, 30000)
-    } else {
-      talkTimerRef.current = setTimeout(finish, BUBBLE_TIMEOUT)
-    }
+    // Always have ttsUrl — play audio immediately
+    if (talkAudioRef.current) talkAudioRef.current.pause()
+    const audio = new Audio(item.ttsUrl)
+    audio.volume = 0.8
+    audio.crossOrigin = "anonymous"
+    talkAudioRef.current = audio
+    audio.onended = () => { talkTimerRef.current = setTimeout(finish, 1500) }
+    audio.onerror = () => { talkTimerRef.current = setTimeout(finish, 3000) }
+    connectAudio(audio)
+    audio.play().catch(() => { talkTimerRef.current = setTimeout(finish, 3000) })
+    talkTimerRef.current = setTimeout(finish, 30000)
   }, [connectAudio])
 
   const enqueueTalk = useCallback((item: TalkItem) => {
     talkQueueRef.current.push(item)
     if (!talkProcessingRef.current) processNextTalk()
   }, [processNextTalk])
-
-  // Attach TTS to current talk message
-  const attachTts = useCallback((ttsUrl: string) => {
-    if (talkProcessingRef.current && talkAudioRef.current === null) {
-      if (talkTimerRef.current) clearTimeout(talkTimerRef.current)
-
-      const audio = new Audio(ttsUrl)
-      audio.volume = 0.8
-      audio.crossOrigin = "anonymous"
-      talkAudioRef.current = audio
-
-      const finish = () => {
-        setCurrentMessage(null)
-        talkAudioRef.current = null
-        talkTimerRef.current = setTimeout(processNextTalk, BUBBLE_GAP)
-      }
-
-      audio.onended = () => { talkTimerRef.current = setTimeout(finish, 1500) }
-      audio.onerror = () => { talkTimerRef.current = setTimeout(finish, 3000) }
-      connectAudio(audio)
-      audio.play().catch(() => { talkTimerRef.current = setTimeout(finish, 3000) })
-      talkTimerRef.current = setTimeout(finish, 30000)
-    }
-  }, [processNextTalk, connectAudio])
 
   // Persist debug field values to localStorage
   useEffect(() => { localStorage.setItem('crawd:talkText', talkText) }, [talkText])
@@ -185,7 +169,8 @@ export function Overlay() {
 
   const sendTalk = () => {
     if (!talkText.trim()) return
-    enqueueTalk({ text: talkText, replyTo: null })
+    // Debug talk — use a local ID, no ack needed
+    enqueueTalk({ id: `debug-${Date.now()}`, text: talkText, ttsUrl: '' })
     setTalkText('')
   }
 
@@ -210,6 +195,7 @@ export function Overlay() {
   // Connect to backend via SDK
   useEffect(() => {
     const client = createCrawdClient(SOCKET_URL)
+    clientRef.current = client
 
     client.on('connect', () => setConnected(true))
     client.on('disconnect', () => setConnected(false))
@@ -217,10 +203,8 @@ export function Overlay() {
     client.on('reply-turn', (data) => enqueueTurn(data))
 
     client.on('talk', (data) => {
-      enqueueTalk({ text: data.message, replyTo: data.replyTo ?? null })
+      enqueueTalk({ id: data.id, text: data.message, ttsUrl: data.ttsUrl })
     })
-
-    client.on('tts', (data) => attachTts(data.ttsUrl))
 
     client.on('status', (data) => {
       setStatus(data.status as typeof status)
@@ -228,12 +212,13 @@ export function Overlay() {
 
     return () => {
       client.destroy()
+      clientRef.current = null
       if (turnTimerRef.current) clearTimeout(turnTimerRef.current)
       if (talkTimerRef.current) clearTimeout(talkTimerRef.current)
       if (turnAudioRef.current) turnAudioRef.current.pause()
       if (talkAudioRef.current) talkAudioRef.current.pause()
     }
-  }, [enqueueTurn, enqueueTalk, attachTts])
+  }, [enqueueTurn, enqueueTalk])
 
   return (
     <div className="w-screen h-screen relative">
@@ -290,17 +275,19 @@ export function Overlay() {
         )}
       </AnimatePresence>
 
-      {/* Bot response bubble (turn phase: response) + vibe messages */}
+      {/* Bot response bubble (turn phase: response) + talk messages */}
       <div className="absolute bottom-[140px] right-[240px]">
         <AnimatePresence>
           {turnPhase === 'response' && currentTurn && (
-            <OverlayBubble message={currentTurn.botMessage} replyTo={null} />
+            <OverlayBubble key="turn-response" message={currentTurn.botMessage} replyTo={null} />
           )}
         </AnimatePresence>
-        {showAll
-          ? <OverlayBubble message="Oh that's a great question, let me think about it!" replyTo={null} />
-          : <OverlayBubble message={currentMessage?.text ?? null} replyTo={currentMessage?.replyTo ?? null} />
-        }
+        <AnimatePresence>
+          {showAll
+            ? <OverlayBubble key="show-all" message="Oh that's a great question, let me think about it!" replyTo={null} />
+            : currentMessage && <OverlayBubble key="talk" message={currentMessage.text} replyTo={null} />
+          }
+        </AnimatePresence>
       </div>
 
       {/* Avatar */}
