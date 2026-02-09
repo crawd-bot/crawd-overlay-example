@@ -9,29 +9,34 @@ import { useAudioAnalysis } from "./hooks/useAudioAnalysis"
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000"
 const BUBBLE_GAP = 1500
 
-type TurnPhase = 'idle' | 'chat' | 'response'
+/** Per-provider volume levels (0–1). TikTok is louder than other providers. */
+const PROVIDER_VOLUME: Record<string, number> = {
+  tiktok: 0.7,
+}
+const DEFAULT_VOLUME = 0.8
 
-type TalkItem = {
-  id: string
-  text: string
-  ttsUrl: string
+function volumeForProvider(provider?: string): number {
+  return provider ? (PROVIDER_VOLUME[provider] ?? DEFAULT_VOLUME) : DEFAULT_VOLUME
 }
 
+type TurnPhase = 'idle' | 'chat' | 'response'
+
+/** Unified queue item — either a talk or reply-turn, processed one at a time */
+type QueueItem =
+  | { type: 'talk'; id: string; text: string; ttsUrl: string; ttsProvider?: string }
+  | { type: 'reply-turn'; id: string; turn: ReplyTurnEvent }
+
 export function Overlay() {
-  // Turn-based state
+  // Unified audio queue — talk and reply-turn events are serialized through one queue
+  const queueRef = useRef<QueueItem[]>([])
+  const processingRef = useRef(false)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  // Visual state driven by the queue processor
   const [turnPhase, setTurnPhase] = useState<TurnPhase>('idle')
   const [currentTurn, setCurrentTurn] = useState<ReplyTurnEvent | null>(null)
-  const turnQueueRef = useRef<ReplyTurnEvent[]>([])
-  const turnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const turnAudioRef = useRef<HTMLAudioElement | null>(null)
-  const turnProcessingRef = useRef(false)
-
-  // Talk message state (agent-controlled speech)
   const [currentMessage, setCurrentMessage] = useState<{ text: string } | null>(null)
-  const talkQueueRef = useRef<TalkItem[]>([])
-  const talkProcessingRef = useRef(false)
-  const talkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const talkAudioRef = useRef<HTMLAudioElement | null>(null)
 
   // Client ref for sending acks back to backend
   const clientRef = useRef<CrawdClient | null>(null)
@@ -49,103 +54,103 @@ export function Overlay() {
 
   const { amplitude, connectAudio } = useAudioAnalysis()
 
-  const clearTurnTimer = () => {
-    if (turnTimerRef.current) { clearTimeout(turnTimerRef.current); turnTimerRef.current = null }
+  const clearTimer = () => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
   }
 
-  // Process next turn from queue
-  const processNextTurn = useCallback(() => {
-    if (turnQueueRef.current.length === 0) {
-      turnProcessingRef.current = false
-      setTurnPhase('idle')
-      setCurrentTurn(null)
+  /** Send ack to backend — audio finished playing for this event */
+  const sendAck = useCallback((id: string) => {
+    clientRef.current?.emit('talk:done', { id })
+  }, [])
+
+  /** Clean up after an item finishes, then schedule next */
+  const finishItem = useCallback((id: string, next: () => void) => {
+    clearTimer()
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current = null
+    }
+    setTurnPhase('idle')
+    setCurrentTurn(null)
+    setCurrentMessage(null)
+    sendAck(id)
+    timerRef.current = setTimeout(next, BUBBLE_GAP)
+  }, [sendAck])
+
+  /** Process next item from the unified queue */
+  const processNext = useCallback(() => {
+    if (queueRef.current.length === 0) {
+      processingRef.current = false
       return
     }
 
-    const turn = turnQueueRef.current.shift()!
-    setCurrentTurn(turn)
-    setTurnPhase('chat')
+    processingRef.current = true
+    const item = queueRef.current.shift()!
 
-    const startResponsePhase = () => {
-      clearTurnTimer()
-      setTurnPhase('response')
+    if (item.type === 'talk') {
+      // --- Talk: show bubble, play TTS, ack when done ---
+      setCurrentMessage({ text: item.text })
 
-      const responseAudio = new Audio(turn.botTtsUrl)
-      responseAudio.volume = 0.8
-      responseAudio.crossOrigin = "anonymous"
-      turnAudioRef.current = responseAudio
-      connectAudio(responseAudio)
+      const finish = () => finishItem(item.id, processNext)
 
-      const finishTurn = () => {
-        clearTurnTimer()
-        setTurnPhase('idle')
-        setCurrentTurn(null)
-        turnTimerRef.current = setTimeout(processNextTurn, BUBBLE_GAP)
+      if (item.ttsUrl) {
+        if (audioRef.current) audioRef.current.pause()
+        const audio = new Audio(item.ttsUrl)
+        audio.volume = volumeForProvider(item.ttsProvider)
+        audio.crossOrigin = "anonymous"
+        audioRef.current = audio
+        audio.onended = () => { timerRef.current = setTimeout(finish, 1500) }
+        audio.onerror = () => { timerRef.current = setTimeout(finish, 3000) }
+        connectAudio(audio)
+        audio.play().catch(() => { timerRef.current = setTimeout(finish, 3000) })
+        timerRef.current = setTimeout(finish, 30000)
+      } else {
+        // No TTS (debug mode) — show bubble briefly then finish
+        timerRef.current = setTimeout(finish, 3000)
+      }
+    } else {
+      // --- Reply-turn: chat phase → response phase → ack ---
+      const { turn } = item
+      setCurrentTurn(turn)
+      setTurnPhase('chat')
+
+      const startResponsePhase = () => {
+        clearTimer()
+        setTurnPhase('response')
+
+        const responseAudio = new Audio(turn.botTtsUrl)
+        responseAudio.volume = volumeForProvider(turn.botTtsProvider)
+        responseAudio.crossOrigin = "anonymous"
+        audioRef.current = responseAudio
+        connectAudio(responseAudio)
+
+        const finish = () => finishItem(item.id, processNext)
+
+        responseAudio.onended = () => { timerRef.current = setTimeout(finish, 1500) }
+        responseAudio.onerror = () => { timerRef.current = setTimeout(finish, 3000) }
+        responseAudio.play().catch(() => { timerRef.current = setTimeout(finish, 3000) })
+
+        timerRef.current = setTimeout(finish, 30000)
       }
 
-      responseAudio.onended = () => { turnTimerRef.current = setTimeout(finishTurn, 1500) }
-      responseAudio.onerror = () => { turnTimerRef.current = setTimeout(finishTurn, 3000) }
-      responseAudio.play().catch(() => { turnTimerRef.current = setTimeout(finishTurn, 3000) })
+      // Phase 1: Show chat message and play chat TTS
+      const chatAudio = new Audio(turn.chatTtsUrl)
+      chatAudio.volume = volumeForProvider(turn.chatTtsProvider)
+      audioRef.current = chatAudio
 
-      turnTimerRef.current = setTimeout(finishTurn, 30000)
+      chatAudio.onended = () => { clearTimer(); timerRef.current = setTimeout(startResponsePhase, 500) }
+      chatAudio.onerror = () => { clearTimer(); timerRef.current = setTimeout(startResponsePhase, 500) }
+      chatAudio.play().catch(() => { clearTimer(); timerRef.current = setTimeout(startResponsePhase, 500) })
+
+      timerRef.current = setTimeout(startResponsePhase, 15000)
     }
+  }, [connectAudio, finishItem])
 
-    // Phase 1: Show chat message and play chat TTS
-    const chatAudio = new Audio(turn.chatTtsUrl)
-    chatAudio.volume = 0.9
-    turnAudioRef.current = chatAudio
-
-    chatAudio.onended = () => { clearTurnTimer(); turnTimerRef.current = setTimeout(startResponsePhase, 500) }
-    chatAudio.onerror = () => { clearTurnTimer(); turnTimerRef.current = setTimeout(startResponsePhase, 500) }
-    chatAudio.play().catch(() => { clearTurnTimer(); turnTimerRef.current = setTimeout(startResponsePhase, 500) })
-
-    turnTimerRef.current = setTimeout(startResponsePhase, 15000)
-  }, [connectAudio])
-
-  const enqueueTurn = useCallback((turn: ReplyTurnEvent) => {
-    turnQueueRef.current.push(turn)
-    if (!turnProcessingRef.current) { turnProcessingRef.current = true; processNextTurn() }
-  }, [processNextTurn])
-
-  // Process next talk message — always has ttsUrl (atomic event)
-  const processNextTalk = useCallback(() => {
-    if (talkQueueRef.current.length === 0) { talkProcessingRef.current = false; return }
-
-    talkProcessingRef.current = true
-    const item = talkQueueRef.current.shift()!
-    setCurrentMessage({ text: item.text })
-
-    const finish = () => {
-      // Stop audio and clean up
-      if (talkAudioRef.current) {
-        talkAudioRef.current.pause()
-        talkAudioRef.current = null
-      }
-      setCurrentMessage(null)
-
-      // Send ack to backend so the agent's tool call resolves
-      clientRef.current?.emit('talk:done', { id: item.id })
-
-      talkTimerRef.current = setTimeout(processNextTalk, BUBBLE_GAP)
-    }
-
-    // Always have ttsUrl — play audio immediately
-    if (talkAudioRef.current) talkAudioRef.current.pause()
-    const audio = new Audio(item.ttsUrl)
-    audio.volume = 0.8
-    audio.crossOrigin = "anonymous"
-    talkAudioRef.current = audio
-    audio.onended = () => { talkTimerRef.current = setTimeout(finish, 1500) }
-    audio.onerror = () => { talkTimerRef.current = setTimeout(finish, 3000) }
-    connectAudio(audio)
-    audio.play().catch(() => { talkTimerRef.current = setTimeout(finish, 3000) })
-    talkTimerRef.current = setTimeout(finish, 30000)
-  }, [connectAudio])
-
-  const enqueueTalk = useCallback((item: TalkItem) => {
-    talkQueueRef.current.push(item)
-    if (!talkProcessingRef.current) processNextTalk()
-  }, [processNextTalk])
+  /** Add an item to the unified queue */
+  const enqueue = useCallback((item: QueueItem) => {
+    queueRef.current.push(item)
+    if (!processingRef.current) processNext()
+  }, [processNext])
 
   // Persist debug field values to localStorage
   useEffect(() => { localStorage.setItem('crawd:talkText', talkText) }, [talkText])
@@ -173,8 +178,7 @@ export function Overlay() {
 
   const sendTalk = () => {
     if (!talkText.trim()) return
-    // Debug talk — use a local ID, no ack needed
-    enqueueTalk({ id: `debug-${Date.now()}`, text: talkText, ttsUrl: '' })
+    enqueue({ type: 'talk', id: `debug-${Date.now()}`, text: talkText, ttsUrl: '' })
     setTalkText('')
   }
 
@@ -214,10 +218,12 @@ export function Overlay() {
     client.on('connect', () => setConnected(true))
     client.on('disconnect', () => setConnected(false))
 
-    client.on('reply-turn', (data) => enqueueTurn(data))
+    client.on('reply-turn', (data) => {
+      enqueue({ type: 'reply-turn', id: data.id, turn: data })
+    })
 
     client.on('talk', (data) => {
-      enqueueTalk({ id: data.id, text: data.message, ttsUrl: data.ttsUrl })
+      enqueue({ type: 'talk', id: data.id, text: data.message, ttsUrl: data.ttsUrl, ttsProvider: data.ttsProvider })
     })
 
     client.on('status', (data) => {
@@ -227,12 +233,10 @@ export function Overlay() {
     return () => {
       client.destroy()
       clientRef.current = null
-      if (turnTimerRef.current) clearTimeout(turnTimerRef.current)
-      if (talkTimerRef.current) clearTimeout(talkTimerRef.current)
-      if (turnAudioRef.current) turnAudioRef.current.pause()
-      if (talkAudioRef.current) talkAudioRef.current.pause()
+      if (timerRef.current) clearTimeout(timerRef.current)
+      if (audioRef.current) audioRef.current.pause()
     }
-  }, [enqueueTurn, enqueueTalk])
+  }, [enqueue])
 
   return (
     <div className="w-screen h-screen relative">
