@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@crawd/cli": "link:../crawd-cli",
+    "crawd": "^0.8.0",
     "@tailwindcss/vite": "^4.1.18",
     "motion": "^12.0.0",
     "react": "^19.0.0",
