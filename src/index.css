@@ -19,3 +19,7 @@
 .corner-squircle {
   corner-shape: squircle;
 }
+
+body {
+  background: #111;
+}

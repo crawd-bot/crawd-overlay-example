@@ -40,6 +40,8 @@ export function Overlay() {
   const [status, setStatus] = useState<'sleep' | 'idle' | 'vibing' | 'chatting' | 'active'>('sleep')
   const [debugMode, setDebugMode] = useState(() => localStorage.getItem('crawd:debug') === '1')
   const [talkText, setTalkText] = useState(() => localStorage.getItem('crawd:talkText') ?? '')
+  const [mockUsername, setMockUsername] = useState(() => localStorage.getItem('crawd:mockUsername') ?? 'viewer123')
+  const [mockMessage, setMockMessage] = useState(() => localStorage.getItem('crawd:mockMessage') ?? '')
   const [chatText, setChatText] = useState(() => localStorage.getItem('crawd:chatText') ?? '')
   const [debugResponse, setDebugResponse] = useState(() => localStorage.getItem('crawd:debugResponse') ?? 'This is a test response from the bot!')
   const [debugLoading, setDebugLoading] = useState(false)
@@ -147,6 +149,8 @@ export function Overlay() {
 
   // Persist debug field values to localStorage
   useEffect(() => { localStorage.setItem('crawd:talkText', talkText) }, [talkText])
+  useEffect(() => { localStorage.setItem('crawd:mockUsername', mockUsername) }, [mockUsername])
+  useEffect(() => { localStorage.setItem('crawd:mockMessage', mockMessage) }, [mockMessage])
   useEffect(() => { localStorage.setItem('crawd:chatText', chatText) }, [chatText])
   useEffect(() => { localStorage.setItem('crawd:debugResponse', debugResponse) }, [debugResponse])
   useEffect(() => { localStorage.setItem('crawd:showAll', showAll ? '1' : '0') }, [showAll])
@@ -172,6 +176,16 @@ export function Overlay() {
     // Debug talk — use a local ID, no ack needed
     enqueueTalk({ id: `debug-${Date.now()}`, text: talkText, ttsUrl: '' })
     setTalkText('')
+  }
+
+  const sendMockChat = async () => {
+    if (!mockMessage.trim()) return
+    await fetch(`${SOCKET_URL}/mock/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: mockUsername || 'viewer123', message: mockMessage }),
+    })
+    setMockMessage('')
   }
 
   const sendTurn = async () => {
@@ -331,6 +345,36 @@ export function Overlay() {
               <button onClick={sendTalk} className="px-3 py-1 rounded bg-white/20 hover:bg-white/30">
                 Send
               </button>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-white/60 mb-1">Mock Chat (→ coordinator):</div>
+            <div className="space-y-2">
+              <input
+                type="text"
+                value={mockUsername}
+                onChange={e => setMockUsername(e.target.value)}
+                placeholder="Username"
+                className="w-full px-2 py-1 rounded bg-white/10 border border-white/20 focus:outline-none focus:border-white/40"
+              />
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={mockMessage}
+                  onChange={e => setMockMessage(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && sendMockChat()}
+                  placeholder="Chat message..."
+                  className="flex-1 px-2 py-1 rounded bg-white/10 border border-white/20 focus:outline-none focus:border-white/40"
+                />
+                <button
+                  onClick={sendMockChat}
+                  disabled={!mockMessage.trim()}
+                  className="px-3 py-1 rounded bg-green-500/50 hover:bg-green-500/70 disabled:opacity-50"
+                >
+                  Send
+                </button>
+              </div>
             </div>
           </div>
 
