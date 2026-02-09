@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, memo } from "react"
 import { motion, AnimatePresence } from "motion/react"
 
 type OverlayBubbleProps = {
@@ -24,7 +24,7 @@ function useTypewriter(text: string | null, speed = 30) {
   return displayed
 }
 
-export function OverlayBubble({ message, replyTo }: OverlayBubbleProps) {
+export const OverlayBubble = memo(function OverlayBubble({ message, replyTo }: OverlayBubbleProps) {
   const displayed = useTypewriter(message)
 
   return (
@@ -68,4 +68,4 @@ export function OverlayBubble({ message, replyTo }: OverlayBubbleProps) {
       )}
     </AnimatePresence>
   )
-}
+})

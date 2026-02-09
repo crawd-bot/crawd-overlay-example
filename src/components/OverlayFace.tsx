@@ -1,11 +1,13 @@
-import { useEffect, useState, useRef } from "react"
+import { useEffect, useState, useRef, memo } from "react"
 import { motion, AnimatePresence } from "motion/react"
+import type { OverlayController } from "../controller/OverlayController"
+import { useAmplitude } from "../hooks/useOverlayController"
 
 type FaceStatus = 'sleep' | 'idle' | 'vibing' | 'chatting' | 'active'
 
 type OverlayFaceProps = {
   status?: FaceStatus
-  audioAmplitude?: number
+  controller: OverlayController
 }
 
 type ZLetter = { id: number; size: 'large' | 'medium' | 'small' }
@@ -34,7 +36,8 @@ function useAutonomousGaze(enabled: boolean) {
 
 const Z_SIZES = ['large', 'medium', 'small'] as const
 
-export function OverlayFace({ status = 'active', audioAmplitude = 0 }: OverlayFaceProps) {
+export const OverlayFace = memo(function OverlayFace({ status = 'active', controller }: OverlayFaceProps) {
+  const audioAmplitude = useAmplitude(controller)
   const isSleeping = status === 'sleep'
   const isTalking = audioAmplitude > 0.05
   const [blinking, setBlinking] = useState(false)
@@ -149,4 +152,4 @@ export function OverlayFace({ status = 'active', audioAmplitude = 0 }: OverlayFa
       </AnimatePresence>
     </motion.div>
   )
-}
+})
