@@ -1,9 +1,11 @@
-import { useState, useEffect } from "react"
-import type { OverlayController } from "../controller/OverlayController"
-import type { OverlaySnapshot } from "../controller/types"
-import { useAmplitude } from "../hooks/useOverlayController"
+'use client'
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000"
+import { useState, useEffect } from "react"
+import type { OverlayController } from "@/controller/OverlayController"
+import type { OverlaySnapshot } from "@/controller/types"
+import { useAmplitude } from "@/hooks/useOverlayController"
+
+const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:4000"
 
 type DebugPanelProps = {
   controller: OverlayController
@@ -28,7 +30,7 @@ export function DebugPanel({ controller, snapshot }: DebugPanelProps) {
 
   const sendTalk = () => {
     if (!talkText.trim()) return
-    controller.enqueue({ type: 'talk', id: `debug-${Date.now()}`, text: talkText, ttsUrl: '' })
+    controller.enqueue({ type: 'talk', id: `debug-${Date.now()}`, text: talkText })
     setTalkText('')
   }
 
@@ -101,7 +103,7 @@ export function DebugPanel({ controller, snapshot }: DebugPanelProps) {
       </div>
 
       <div>
-        <div className="text-white/60 mb-1">Mock Chat (→ coordinator):</div>
+        <div className="text-white/60 mb-1">{'Mock Chat (-> coordinator):'}</div>
         <div className="space-y-2">
           <input
             type="text"
@@ -152,7 +154,7 @@ export function DebugPanel({ controller, snapshot }: DebugPanelProps) {
             disabled={debugLoading || !chatText.trim()}
             className={`w-full px-3 py-1 rounded ${debugLoading ? 'bg-blue-500/30 cursor-wait' : 'bg-blue-500/50 hover:bg-blue-500/70'} disabled:opacity-50`}
           >
-            {debugLoading ? 'Generating TTS...' : 'Send'}
+            {debugLoading ? 'Sending...' : 'Send'}
           </button>
         </div>
       </div>

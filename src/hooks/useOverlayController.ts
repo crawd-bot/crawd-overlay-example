@@ -1,19 +1,21 @@
-import { useSyncExternalStore } from 'react'
-import { OverlayController } from '../controller/OverlayController'
-import { createDefaultDeps } from '../controller/defaults'
-import type { OverlaySnapshot } from '../controller/types'
+'use client'
 
-// Module-level singleton — survives React strict-mode double-mount,
-// completely decoupled from React lifecycle. Appropriate for an OBS
-// browser source where only one overlay instance ever exists.
-let _controller: OverlayController | null = null
+import { useSyncExternalStore } from 'react'
+import { OverlayController } from '@/controller/OverlayController'
+import { createDefaultDeps } from '@/controller/defaults'
+import type { OverlaySnapshot } from '@/controller/types'
+
+// Singleton stored on window so it survives Next.js HMR module re-evaluation.
+// Module-level `let` gets reset on every hot reload, leaking socket connections.
+const GLOBAL_KEY = '__crawdController' as const
 
 function getController(socketUrl: string): OverlayController {
-  if (!_controller) {
-    _controller = new OverlayController(socketUrl, createDefaultDeps())
-    _controller.connect()
+  const w = globalThis as any
+  if (!w[GLOBAL_KEY]) {
+    w[GLOBAL_KEY] = new OverlayController(socketUrl, createDefaultDeps())
+    w[GLOBAL_KEY].connect()
   }
-  return _controller
+  return w[GLOBAL_KEY]
 }
 
 /**
@@ -48,8 +50,9 @@ export function useAmplitude(controller: OverlayController): number {
 
 // For testing: reset the singleton
 export function _resetController(): void {
-  if (_controller) {
-    _controller.destroy()
-    _controller = null
+  const w = globalThis as any
+  if (w[GLOBAL_KEY]) {
+    w[GLOBAL_KEY].destroy()
+    delete w[GLOBAL_KEY]
   }
 }

@@ -4,6 +4,7 @@ import type {
   OverlaySnapshot,
   OverlayStatus,
   QueueItem,
+  TtsResult,
 } from './types'
 
 /** Per-provider volume levels (0–1). TikTok is louder than other providers. */
@@ -135,8 +136,6 @@ export class OverlayController {
         type: 'talk',
         id: data.id,
         text: data.message,
-        ttsUrl: data.ttsUrl,
-        ttsProvider: (data as any).ttsProvider,
       })
     })
 
@@ -207,48 +206,90 @@ export class OverlayController {
     }
   }
 
-  private _processTalk(item: QueueItem & { type: 'talk' }): void {
+  private async _processTalk(item: QueueItem & { type: 'talk' }): Promise<void> {
     this._set('currentMessage', { text: item.text })
 
     const finish = () => this._finishItem(item.id)
 
-    if (item.ttsUrl) {
-      this._playAudio(item.ttsUrl, item.ttsProvider, finish)
+    let ttsResult: TtsResult = null
+    try {
+      ttsResult = await this._deps.generateTts(item.text, 'bot')
+    } catch {
+      // TTS generation failed — fall through to text-only mode
+    }
+
+    if (this._destroyed) return
+
+    if (ttsResult) {
+      const blobUrl = this._deps.createBlobUrl(ttsResult.base64)
+      this._playAudio(blobUrl, ttsResult.provider, () => {
+        this._deps.revokeBlobUrl(blobUrl)
+        finish()
+      })
     } else {
       this._timer = this._deps.setTimeout(finish, NO_TTS_DELAY_MS)
     }
   }
 
-  private _processReplyTurn(item: QueueItem & { type: 'reply-turn' }): void {
+  private async _processReplyTurn(item: QueueItem & { type: 'reply-turn' }): Promise<void> {
     const { turn } = item
 
     this._setBatch({ currentTurn: turn, turnPhase: 'chat' })
+
+    let chatTts: TtsResult = null
+    let botTts: TtsResult = null
+    try {
+      ;[chatTts, botTts] = await Promise.all([
+        this._deps.generateTts(turn.chat.message, 'chat'),
+        this._deps.generateTts(turn.botMessage, 'bot'),
+      ])
+    } catch {
+      // TTS generation failed
+    }
+
+    if (this._destroyed) return
+
+    const finishTurn = () => this._finishItem(item.id)
 
     const startResponsePhase = () => {
       this._clearTimer()
       this._set('turnPhase', 'response')
 
-      const finish = () => this._finishItem(item.id)
-      this._playAudio(turn.botTtsUrl, turn.botTtsProvider, finish)
+      if (botTts) {
+        const botBlobUrl = this._deps.createBlobUrl(botTts.base64)
+        this._playAudio(botBlobUrl, botTts.provider, () => {
+          this._deps.revokeBlobUrl(botBlobUrl)
+          finishTurn()
+        })
+      } else {
+        this._timer = this._deps.setTimeout(finishTurn, NO_TTS_DELAY_MS)
+      }
     }
 
-    // Phase 1: chat audio
-    this._stopAudio()
-    const chatAudio = this._deps.createAudio(turn.chatTtsUrl)
-    chatAudio.volume = volumeForProvider(turn.chatTtsProvider)
-    this._audio = chatAudio
+    if (chatTts) {
+      // Phase 1: play chat audio
+      const chatBlobUrl = this._deps.createBlobUrl(chatTts.base64)
+      this._stopAudio()
+      const chatAudio = this._deps.createAudio(chatBlobUrl)
+      chatAudio.volume = volumeForProvider(chatTts.provider)
+      this._audio = chatAudio
 
-    const onChatEnd = () => {
-      this._clearTimer()
-      this._timer = this._deps.setTimeout(startResponsePhase, PHASE_TRANSITION_DELAY_MS)
+      const onChatEnd = () => {
+        this._deps.revokeBlobUrl(chatBlobUrl)
+        this._clearTimer()
+        this._timer = this._deps.setTimeout(startResponsePhase, PHASE_TRANSITION_DELAY_MS)
+      }
+
+      chatAudio.onended = onChatEnd
+      chatAudio.onerror = onChatEnd
+      chatAudio.play().catch(onChatEnd)
+
+      // Safety timeout for chat phase
+      this._timer = this._deps.setTimeout(startResponsePhase, CHAT_PHASE_TIMEOUT_MS)
+    } else {
+      // No chat TTS — go straight to response phase
+      startResponsePhase()
     }
-
-    chatAudio.onended = onChatEnd
-    chatAudio.onerror = onChatEnd
-    chatAudio.play().catch(onChatEnd)
-
-    // Safety timeout for chat phase
-    this._timer = this._deps.setTimeout(startResponsePhase, CHAT_PHASE_TIMEOUT_MS)
   }
 
   private _playAudio(url: string, provider: string | undefined, onFinish: () => void): void {

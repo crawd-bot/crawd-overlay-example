@@ -5,8 +5,10 @@ export type TurnPhase = 'idle' | 'chat' | 'response'
 
 export type OverlayStatus = 'sleep' | 'idle' | 'vibing' | 'chatting' | 'active'
 
+export type TtsResult = { base64: string; provider: string } | null
+
 export type QueueItem =
-  | { type: 'talk'; id: string; text: string; ttsUrl: string; ttsProvider?: string }
+  | { type: 'talk'; id: string; text: string }
   | { type: 'reply-turn'; id: string; turn: ReplyTurnEvent }
 
 export type OverlaySnapshot = {
@@ -27,4 +29,7 @@ export type OverlayControllerDeps = {
   cancelAnimationFrame: (id: number) => void
   setTimeout: (cb: () => void, ms: number) => number
   clearTimeout: (id: number) => void
+  generateTts: (text: string, voice: 'bot' | 'chat') => Promise<TtsResult>
+  createBlobUrl: (base64: string) => string
+  revokeBlobUrl: (url: string) => void
 }

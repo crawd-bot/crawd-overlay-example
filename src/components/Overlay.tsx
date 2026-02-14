@@ -1,17 +1,22 @@
+'use client'
+
 import { useEffect, useState } from "react"
 import { motion, AnimatePresence } from "motion/react"
-import { OverlayFace } from "./components/OverlayFace"
-import { OverlayBubble } from "./components/OverlayBubble"
-import { DebugPanel } from "./components/DebugPanel"
-import { useOverlayController } from "./hooks/useOverlayController"
+import { OverlayFace } from "./OverlayFace"
+import { OverlayBubble } from "./OverlayBubble"
+import { DebugPanel } from "./DebugPanel"
+import { useOverlayController } from "@/hooks/useOverlayController"
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000"
+const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:4000"
 
 export function Overlay() {
   const { controller, snapshot } = useOverlayController(SOCKET_URL)
   const { status, turnPhase, currentTurn, currentMessage, showAll } = snapshot
 
-  const [debugMode, setDebugMode] = useState(() => localStorage.getItem('crawd:debug') === '1')
+  const [debugMode, setDebugMode] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return localStorage.getItem('crawd:debug') === '1'
+  })
 
   // Debug mode toggle (Ctrl+D)
   useEffect(() => {

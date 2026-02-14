@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { OverlayController, volumeForProvider } from './OverlayController'
-import type { OverlayControllerDeps } from './types'
+import type { OverlayControllerDeps, TtsResult } from './types'
 
 // ---------------------------------------------------------------------------
 // Mock factories
@@ -37,7 +37,6 @@ function createMockAudio(url: string): MockAudio {
     }),
     pause: vi.fn(() => {
       audio.paused = true
-      // Fire pause listeners
       for (const fn of listeners.get('pause') ?? []) fn()
     }),
     addEventListener: vi.fn((event: string, handler: () => void) => {
@@ -91,13 +90,14 @@ function createMockClient(): MockClient {
 type MockDeps = OverlayControllerDeps & {
   _mockClient: MockClient
   _audios: MockAudio[]
+  _ttsResponse: TtsResult
 }
 
 function createMockDeps(): MockDeps {
   const mockClient = createMockClient()
   const audios: MockAudio[] = []
 
-  return {
+  const deps: MockDeps = {
     createClient: vi.fn(() => mockClient as any),
     createAudio: vi.fn((url: string) => {
       const audio = createMockAudio(url)
@@ -123,15 +123,22 @@ function createMockDeps(): MockDeps {
     requestAnimationFrame: vi.fn(() => 0),
     cancelAnimationFrame: vi.fn(),
     setTimeout: vi.fn((cb, _ms) => {
-      // Return a unique id but don't auto-fire — tests call flush manually
       return timerManager.register(cb)
     }),
     clearTimeout: vi.fn((id) => {
       timerManager.cancel(id)
     }),
+    generateTts: vi.fn(async (): Promise<TtsResult> => {
+      return deps._ttsResponse
+    }),
+    createBlobUrl: vi.fn((base64: string) => `blob:mock-${base64.slice(0, 8)}`),
+    revokeBlobUrl: vi.fn(),
     _mockClient: mockClient,
     _audios: audios,
+    _ttsResponse: { base64: 'AAAA', provider: 'openai' },
   }
+
+  return deps
 }
 
 // Simple timer manager for test control
@@ -147,7 +154,6 @@ const timerManager = {
     timerManager._pending.delete(id)
   },
   flush(): void {
-    // Fire all pending timers (snapshot to avoid mutation during iteration)
     const pending = [...timerManager._pending.entries()]
     timerManager._pending.clear()
     for (const [, cb] of pending) cb()
@@ -165,6 +171,11 @@ const timerManager = {
   get size(): number {
     return timerManager._pending.size
   },
+}
+
+/** Flush microtask queue (await all pending promises) */
+function flushMicrotasks(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
 }
 
 // ---------------------------------------------------------------------------
@@ -309,29 +320,36 @@ describe('OverlayController', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Queue processing — talk
+  // Queue processing — talk (with TTS)
   // -------------------------------------------------------------------------
 
-  describe('talk queue processing', () => {
-    it('sets currentMessage when processing talk item', () => {
-      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!', ttsUrl: 'http://audio/1.mp3' })
+  describe('talk queue processing (with TTS)', () => {
+    it('sets currentMessage when processing talk item', async () => {
+      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!' })
+      // currentMessage is set synchronously before TTS
       expect(ctrl.getSnapshot().currentMessage).toEqual({ text: 'Hello!' })
     })
 
-    it('creates audio with correct URL and volume', () => {
-      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!', ttsUrl: 'http://audio/1.mp3', ttsProvider: 'tiktok' })
-      expect(deps.createAudio).toHaveBeenCalledWith('http://audio/1.mp3')
-      expect(deps._audios[0].volume).toBe(0.7)
+    it('calls generateTts with correct params', async () => {
+      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!' })
+      await flushMicrotasks()
+      expect(deps.generateTts).toHaveBeenCalledWith('Hello!', 'bot')
     })
 
-    it('plays audio', () => {
-      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!', ttsUrl: 'http://audio/1.mp3' })
+    it('creates blob URL from TTS result and plays audio', async () => {
+      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!' })
+      await flushMicrotasks()
+
+      expect(deps.createBlobUrl).toHaveBeenCalledWith('AAAA')
+      expect(deps._audios[0].url).toBe('blob:mock-AAAA')
+      expect(deps._audios[0].volume).toBe(0.8) // openai
       expect(deps._audios[0].play).toHaveBeenCalled()
     })
 
-    it('returns to idle and sends ack after audio ends', () => {
+    it('returns to idle and sends ack after audio ends', async () => {
       ctrl.connect()
-      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!', ttsUrl: 'http://audio/1.mp3' })
+      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!' })
+      await flushMicrotasks()
 
       // Simulate audio ending
       deps._audios[0]._simulateEnd()
@@ -344,18 +362,28 @@ describe('OverlayController', () => {
       expect(deps._mockClient.emit).toHaveBeenCalledWith('talk:done', { id: 'talk-1' })
     })
 
-    it('handles talk with no ttsUrl (debug mode)', () => {
-      ctrl.enqueue({ type: 'talk', id: 'debug-1', text: 'Debug message', ttsUrl: '' })
-      expect(ctrl.getSnapshot().currentMessage).toEqual({ text: 'Debug message' })
-      expect(deps.createAudio).not.toHaveBeenCalled()
+    it('revokes blob URL after audio finishes', async () => {
+      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!' })
+      await flushMicrotasks()
 
-      // NO_TTS_DELAY timeout fires → finishItem
-      timerManager.flushOne()
-      expect(ctrl.getSnapshot().currentMessage).toBeNull()
+      deps._audios[0]._simulateEnd()
+      timerManager.flushOne() // post-audio delay → finishItem
+
+      expect(deps.revokeBlobUrl).toHaveBeenCalledWith('blob:mock-AAAA')
     })
 
-    it('recovers from audio error', () => {
-      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!', ttsUrl: 'http://audio/1.mp3' })
+    it('uses tiktok volume when provider is tiktok', async () => {
+      deps._ttsResponse = { base64: 'BBBB', provider: 'tiktok' }
+      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!' })
+      await flushMicrotasks()
+
+      expect(deps._audios[0].volume).toBe(0.7)
+    })
+
+    it('recovers from audio error', async () => {
+      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!' })
+      await flushMicrotasks()
+
       deps._audios[0]._simulateError()
 
       // Error delay timer → finishItem
@@ -363,8 +391,7 @@ describe('OverlayController', () => {
       expect(ctrl.getSnapshot().currentMessage).toBeNull()
     })
 
-    it('recovers from play() rejection', () => {
-      // Override play to reject
+    it('recovers from play() rejection', async () => {
       deps.createAudio = vi.fn((url: string) => {
         const audio = createMockAudio(url)
         audio.play = vi.fn(() => Promise.reject(new Error('blocked')))
@@ -372,13 +399,47 @@ describe('OverlayController', () => {
         return audio as any
       })
 
-      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!', ttsUrl: 'http://audio/1.mp3' })
+      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!' })
+      await flushMicrotasks()
+      await flushMicrotasks() // extra flush for play rejection
 
-      // play() rejection schedules error delay → flush microtasks then timer
-      return Promise.resolve().then(() => {
-        timerManager.flushOne()
-        expect(ctrl.getSnapshot().currentMessage).toBeNull()
-      })
+      timerManager.flushOne()
+      expect(ctrl.getSnapshot().currentMessage).toBeNull()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Queue processing — talk (no TTS)
+  // -------------------------------------------------------------------------
+
+  describe('talk queue processing (no TTS)', () => {
+    beforeEach(() => {
+      deps._ttsResponse = null
+    })
+
+    it('falls back to text-only delay when generateTts returns null', async () => {
+      ctrl.connect()
+      ctrl.enqueue({ type: 'talk', id: 'debug-1', text: 'Debug message' })
+      await flushMicrotasks()
+
+      expect(ctrl.getSnapshot().currentMessage).toEqual({ text: 'Debug message' })
+      expect(deps.createAudio).not.toHaveBeenCalled()
+
+      // NO_TTS_DELAY timeout fires → finishItem
+      timerManager.flushOne()
+      expect(ctrl.getSnapshot().currentMessage).toBeNull()
+      expect(deps._mockClient.emit).toHaveBeenCalledWith('talk:done', { id: 'debug-1' })
+    })
+
+    it('falls back to text-only delay when generateTts throws', async () => {
+      deps.generateTts = vi.fn(async () => { throw new Error('TTS failed') })
+      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Hello!' })
+      await flushMicrotasks()
+
+      expect(deps.createAudio).not.toHaveBeenCalled()
+      // NO_TTS_DELAY timeout fires → finishItem
+      timerManager.flushOne()
+      expect(ctrl.getSnapshot().currentMessage).toBeNull()
     })
   })
 
@@ -391,10 +452,6 @@ describe('OverlayController', () => {
       id: 'turn-1',
       chat: { username: 'viewer', message: 'Whats up?' },
       botMessage: 'Not much!',
-      chatTtsUrl: 'http://audio/chat.mp3',
-      botTtsUrl: 'http://audio/bot.mp3',
-      chatTtsProvider: 'tiktok' as const,
-      botTtsProvider: 'openai' as const,
     }
 
     it('starts in chat phase with currentTurn set', () => {
@@ -403,14 +460,26 @@ describe('OverlayController', () => {
       expect(ctrl.getSnapshot().currentTurn).toBe(turn)
     })
 
-    it('creates chat audio with correct volume', () => {
+    it('calls generateTts for both chat and bot in parallel', async () => {
       ctrl.enqueue({ type: 'reply-turn', id: 'turn-1', turn })
-      expect(deps._audios[0].url).toBe('http://audio/chat.mp3')
-      expect(deps._audios[0].volume).toBe(0.7) // tiktok
+      await flushMicrotasks()
+
+      expect(deps.generateTts).toHaveBeenCalledWith('Whats up?', 'chat')
+      expect(deps.generateTts).toHaveBeenCalledWith('Not much!', 'bot')
     })
 
-    it('transitions to response phase after chat audio ends', () => {
+    it('creates chat audio first', async () => {
       ctrl.enqueue({ type: 'reply-turn', id: 'turn-1', turn })
+      await flushMicrotasks()
+
+      // First audio is the chat audio
+      expect(deps._audios.length).toBeGreaterThanOrEqual(1)
+      expect(deps._audios[0].url).toContain('blob:mock-')
+    })
+
+    it('transitions to response phase after chat audio ends', async () => {
+      ctrl.enqueue({ type: 'reply-turn', id: 'turn-1', turn })
+      await flushMicrotasks()
 
       // Chat audio ends
       deps._audios[0]._simulateEnd()
@@ -420,13 +489,13 @@ describe('OverlayController', () => {
 
       expect(ctrl.getSnapshot().turnPhase).toBe('response')
       // Bot audio should be created
-      expect(deps._audios[1].url).toBe('http://audio/bot.mp3')
-      expect(deps._audios[1].volume).toBe(0.8) // openai
+      expect(deps._audios.length).toBeGreaterThanOrEqual(2)
     })
 
-    it('completes full turn lifecycle', () => {
+    it('completes full turn lifecycle', async () => {
       ctrl.connect()
       ctrl.enqueue({ type: 'reply-turn', id: 'turn-1', turn })
+      await flushMicrotasks()
 
       // Chat audio ends
       deps._audios[0]._simulateEnd()
@@ -440,6 +509,37 @@ describe('OverlayController', () => {
       expect(ctrl.getSnapshot().currentTurn).toBeNull()
       expect(deps._mockClient.emit).toHaveBeenCalledWith('talk:done', { id: 'turn-1' })
     })
+
+    it('skips to response phase when no chat TTS', async () => {
+      // Only return TTS for bot, null for chat
+      let callCount = 0
+      deps.generateTts = vi.fn(async (_text: string, voice: 'bot' | 'chat'): Promise<TtsResult> => {
+        callCount++
+        return voice === 'bot' ? { base64: 'BOT1', provider: 'openai' } : null
+      })
+
+      ctrl.connect()
+      ctrl.enqueue({ type: 'reply-turn', id: 'turn-1', turn })
+      await flushMicrotasks()
+
+      // No chat audio — should go straight to response phase
+      expect(ctrl.getSnapshot().turnPhase).toBe('response')
+      expect(callCount).toBe(2) // both called
+    })
+
+    it('handles text-only turn (no TTS for either)', async () => {
+      deps._ttsResponse = null
+      ctrl.connect()
+      ctrl.enqueue({ type: 'reply-turn', id: 'turn-1', turn })
+      await flushMicrotasks()
+
+      // Should go directly to response phase (no chat TTS)
+      // then NO_TTS_DELAY for response
+      timerManager.flushOne() // NO_TTS_DELAY → finishItem
+
+      expect(ctrl.getSnapshot().turnPhase).toBe('idle')
+      expect(deps._mockClient.emit).toHaveBeenCalledWith('talk:done', { id: 'turn-1' })
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -447,12 +547,14 @@ describe('OverlayController', () => {
   // -------------------------------------------------------------------------
 
   describe('queue serialization', () => {
-    it('processes items one at a time', () => {
-      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'First', ttsUrl: 'http://audio/1.mp3' })
-      ctrl.enqueue({ type: 'talk', id: 'talk-2', text: 'Second', ttsUrl: 'http://audio/2.mp3' })
+    it('processes items one at a time', async () => {
+      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'First' })
+      ctrl.enqueue({ type: 'talk', id: 'talk-2', text: 'Second' })
 
       expect(ctrl.getSnapshot().currentMessage).toEqual({ text: 'First' })
       expect(ctrl.getSnapshot().queueLength).toBe(1)
+
+      await flushMicrotasks()
 
       // First audio ends
       deps._audios[0]._simulateEnd()
@@ -463,22 +565,22 @@ describe('OverlayController', () => {
 
       // BUBBLE_GAP timer → processNext
       timerManager.flushOne()
+      await flushMicrotasks()
 
       expect(ctrl.getSnapshot().currentMessage).toEqual({ text: 'Second' })
       expect(ctrl.getSnapshot().queueLength).toBe(0)
     })
 
     it('tracks queueLength correctly', () => {
-      expect(ctrl.getSnapshot().queueLength).toBe(0)
-
-      ctrl.enqueue({ type: 'talk', id: '1', text: 'A', ttsUrl: '' })
+      deps._ttsResponse = null // no TTS so processing is simpler
+      ctrl.enqueue({ type: 'talk', id: '1', text: 'A' })
       // First item is immediately shifted for processing
       expect(ctrl.getSnapshot().queueLength).toBe(0)
 
-      ctrl.enqueue({ type: 'talk', id: '2', text: 'B', ttsUrl: '' })
+      ctrl.enqueue({ type: 'talk', id: '2', text: 'B' })
       expect(ctrl.getSnapshot().queueLength).toBe(1)
 
-      ctrl.enqueue({ type: 'talk', id: '3', text: 'C', ttsUrl: '' })
+      ctrl.enqueue({ type: 'talk', id: '3', text: 'C' })
       expect(ctrl.getSnapshot().queueLength).toBe(2)
     })
   })
@@ -488,8 +590,10 @@ describe('OverlayController', () => {
   // -------------------------------------------------------------------------
 
   describe('destroy during playback', () => {
-    it('pauses audio and clears state', () => {
-      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Playing...', ttsUrl: 'http://audio/1.mp3' })
+    it('pauses audio and clears state', async () => {
+      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Playing...' })
+      await flushMicrotasks()
+
       expect(deps._audios[0].play).toHaveBeenCalled()
 
       ctrl.destroy()
@@ -501,7 +605,7 @@ describe('OverlayController', () => {
 
     it('does not process further items after destroy', () => {
       ctrl.destroy()
-      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Ignored', ttsUrl: '' })
+      ctrl.enqueue({ type: 'talk', id: 'talk-1', text: 'Ignored' })
       expect(ctrl.getSnapshot().currentMessage).toBeNull()
     })
   })
@@ -534,8 +638,6 @@ describe('OverlayController', () => {
       deps._mockClient._simulateEvent('talk', {
         id: 'server-talk-1',
         message: 'Hello from server',
-        ttsUrl: 'http://audio/server.mp3',
-        ttsProvider: 'openai',
       })
 
       expect(ctrl.getSnapshot().currentMessage).toEqual({ text: 'Hello from server' })
@@ -547,8 +649,6 @@ describe('OverlayController', () => {
         id: 'server-turn-1',
         chat: { username: 'user1', message: 'Hi' },
         botMessage: 'Hey!',
-        chatTtsUrl: 'http://audio/chat.mp3',
-        botTtsUrl: 'http://audio/bot.mp3',
       }
 
       deps._mockClient._simulateEvent('reply-turn', turn)

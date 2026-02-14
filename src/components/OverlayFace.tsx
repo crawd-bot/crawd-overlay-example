@@ -1,7 +1,9 @@
+'use client'
+
 import { useEffect, useState, useRef, memo } from "react"
 import { motion, AnimatePresence } from "motion/react"
-import type { OverlayController } from "../controller/OverlayController"
-import { useAmplitude } from "../hooks/useOverlayController"
+import type { OverlayController } from "@/controller/OverlayController"
+import { useAmplitude } from "@/hooks/useOverlayController"
 
 type FaceStatus = 'sleep' | 'idle' | 'vibing' | 'chatting' | 'active'
 
