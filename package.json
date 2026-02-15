@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4",
-    "crawd": "file:../crawd-cli",
+    "crawd": "^0.9.1",
     "motion": "^12.0.0",
     "next": "^15",
     "openai": "^4",

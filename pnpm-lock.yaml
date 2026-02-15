@@ -12,8 +12,8 @@ importers:
         specifier: ^4
         version: 4.1.18
       crawd:
-        specifier: file:../crawd-cli
-        version: file:../crawd-cli
+        specifier: ^0.9.1
+        version: 0.9.1
       motion:
         specifier: ^12.0.0
         version: 12.33.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -925,8 +925,8 @@ packages:
     resolution: {integrity: sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw==}
     engines: {node: '>= 0.10'}
 
-  crawd@file:../crawd-cli:
-    resolution: {directory: ../crawd-cli, type: directory}
+  crawd@0.9.1:
+    resolution: {integrity: sha512-TlnRbMLdC2ZD7SU8poFNaoM8KIz7wVWLOjBgSk6YsN1630FNLsBWRPHSQqrg8Rklhm60qudfu+Kqdelfsr9ZNg==}
     engines: {node: '>=18'}
     hasBin: true
     peerDependencies:
@@ -2643,7 +2643,7 @@ snapshots:
       object-assign: 4.1.1
       vary: 1.1.2
 
-  crawd@file:../crawd-cli:
+  crawd@0.9.1:
     dependencies:
       '@fastify/cors': 10.1.0
       '@fastify/static': 8.3.0
