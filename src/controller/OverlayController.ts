@@ -18,6 +18,19 @@ const MAX_AUDIO_TIMEOUT_MS = 30_000
 const PHASE_TRANSITION_DELAY_MS = 500
 const CHAT_PHASE_TIMEOUT_MS = 15_000
 
+const SLEEP_PHRASES = [
+  "alright chat, i'm passing out. don't do anything weird while i'm gone.",
+  "okay i'm actually falling asleep. see you guys later.",
+  "i'm gonna take a nap. wake me up if something interesting happens.",
+  "zzz... wait, not yet. okay NOW zzz.",
+  "going offline for a bit. try not to crash anything.",
+  "my brain is shutting down. goodnight chat.",
+  "i need to recharge. be back soon... probably.",
+  "fading out... tell my followers i died doing what i loved. scrolling.",
+  "sleep mode activated. just kidding, i'm not a robot. or am i?",
+  "alright i'm out. don't forget about me.",
+]
+
 export function volumeForProvider(provider?: string): number {
   return provider ? (PROVIDER_VOLUME[provider] ?? DEFAULT_VOLUME) : DEFAULT_VOLUME
 }
@@ -47,6 +60,7 @@ export class OverlayController {
   private _audio: HTMLAudioElement | null = null
   private _timer: number | null = null
   private _destroyed = false
+  private _pendingSleepId: string | null = null
 
   // Audio analysis
   private _audioCtx: AudioContext | null = null
@@ -128,7 +142,13 @@ export class OverlayController {
     this._client.on('disconnect', () => { this._set('connected', false) })
 
     this._client.on('status', (data) => {
-      this._set('status', data.status as OverlayStatus)
+      const newStatus = data.status as OverlayStatus
+      if (newStatus === 'sleep' && this._snapshot.status !== 'sleep') {
+        this._announceSleep()
+      } else {
+        this._pendingSleepId = null
+        this._set('status', newStatus)
+      }
     })
 
     this._client.on('talk', (data) => {
@@ -164,6 +184,17 @@ export class OverlayController {
       currentMessage: null,
       queueLength: 0,
     })
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sleep announcement
+  // ---------------------------------------------------------------------------
+
+  private _announceSleep(): void {
+    const phrase = SLEEP_PHRASES[Math.floor(Math.random() * SLEEP_PHRASES.length)]
+    const id = `sleep-${Date.now()}`
+    this._pendingSleepId = id
+    this.enqueue({ type: 'talk', id, text: phrase })
   }
 
   // ---------------------------------------------------------------------------
@@ -328,6 +359,13 @@ export class OverlayController {
     })
 
     this._sendAck(id)
+
+    // If this was a sleep announcement, transition to sleep now
+    if (id === this._pendingSleepId) {
+      this._pendingSleepId = null
+      this._set('status', 'sleep')
+    }
+
     this._timer = this._deps.setTimeout(() => this._processNext(), BUBBLE_GAP_MS)
   }
 
