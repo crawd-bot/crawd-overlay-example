@@ -8,7 +8,7 @@ import type {
 } from './types'
 
 /** Per-provider volume levels (0–1). TikTok is louder than other providers. */
-const PROVIDER_VOLUME: Record<string, number> = { tiktok: 0.7 }
+const PROVIDER_VOLUME: Record<string, number> = { tiktok: 0.7, openai: 1 }
 const DEFAULT_VOLUME = 0.8
 const BUBBLE_GAP_MS = 1500
 const POST_AUDIO_DELAY_MS = 1500
